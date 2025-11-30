@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import numpy as np
-from babel.numbers import format_currency # Importa a função de formatação de moeda
+from babel.numbers import format_currency 
 
 # ===================================================================================
 # 1. CONFIGURAÇÃO DA PÁGINA E VARIÁVEIS GLOBAIS
@@ -35,31 +35,34 @@ TRADUCAO_DIAS = {
 }
 ORDEM_DIAS = list(TRADUCAO_DIAS.values()) # Usada para ordenação de gráficos
 
+# Colunas esperadas e suas alternativas mais prováveis (Normalizadas para busca)
+COLUNAS_ESPERADAS = {
+    'Data': ['DATA', 'ROTULOS DE LINHA', 'FIELD1'],
+    'Volume_M3': ['VOLUME_M3', 'QTD.M3', 'M3', 'QUANTIDADE'],
+    'Valor': ['VALOR', 'CUSTO', 'TOTAL', 'REAIS', 'FIELD2']
+}
+
 # ===================================================================================
 # 2. FUNÇÕES DE PROCESSAMENTO
 # ===================================================================================
 
 # Cache para evitar recarregar o arquivo Excel toda vez
 @st.cache_data
-def carregar_e_processar_dados(uploaded_file):
+def carregar_e_processar_dados(uploaded_file, header_row):
     """
     Carrega o arquivo Excel, limpa e processa os dados brutos.
-    Retorna o DataFrame processado e uma lista de colunas faltantes.
+    O parâmetro header_row indica qual linha do Excel contém o cabeçalho (começa em 0).
     """
     if uploaded_file is not None:
         try:
-            # Tenta ler o arquivo Excel (openpyxl é usado por baixo dos panros)
-            df_bruto = pd.read_excel(uploaded_file)
+            # Tenta ler o arquivo Excel, usando a linha de cabeçalho especificada
+            # O parâmetro header usa o índice da linha (começando em 0).
+            # Se o usuário indicar 1, o Pandas lê a segunda linha do Excel como cabeçalho.
+            df_bruto = pd.read_excel(uploaded_file, header=header_row)
         except Exception as e:
-            st.error(f"Erro ao ler o arquivo Excel: Verifique se o arquivo está no formato XLSX e não está corrompido. Detalhe: {e}")
+            st.error(f"Erro ao ler o arquivo Excel. Detalhe: {e}")
             return pd.DataFrame(), ["Erro de Leitura"], []
 
-        # Colunas esperadas e suas alternativas mais prováveis
-        colunas_esperadas = {
-            'Data': ['Data', 'DATE', 'ROTULOS DE LINHA'],
-            'Volume_M3': ['VOLUME_M3', 'QTD.M3', 'METROS CUBICOS', 'M3'],
-            'Valor': ['VALOR', 'CUSTO', 'TOTAL', 'REAIS']
-        }
         
         df = df_bruto.copy()
         
@@ -67,38 +70,60 @@ def carregar_e_processar_dados(uploaded_file):
         colunas_originais = list(df.columns)
 
         colunas_faltantes = []
-        colunas_mapeadas = {}
 
-        # Mapeamento robusto: normaliza nomes de colunas para facilitar a busca
-        
-        # 1. Normaliza as colunas do DataFrame para buscar (uppercase, sem espaços/pontos/acento)
+        # 1. Normaliza as colunas do DataFrame para facilitar a busca (uppercase, sem espaços/pontos/acento)
         colunas_df_normalizadas = {
-            col.upper().replace(' ', '').replace('.', '').replace('³', '3'): col 
+            # Cria a chave normalizada (ex: 'VOLUME_M3') -> valor (nome da coluna original 'Volume M3')
+            str(col).upper().replace(' ', '').replace('.', '').replace('³', '3'): col 
             for col in df.columns
         }
         
         # 2. Tenta mapear as colunas
-        for coluna_padrao, alternativas in colunas_esperadas.items():
+        for coluna_padrao, alternativas in COLUNAS_ESPERADAS.items():
             encontrado = False
             for alt in alternativas:
                 # Normaliza a alternativa para busca
                 alt_norm = alt.upper().replace(' ', '').replace('.', '').replace('³', '3')
                 
+                # O problema estava aqui: o nome da coluna original é Unnamed: X, mas o conteúdo é que importa.
+                # Como não temos como saber o conteúdo da célula na linha 0, temos que depender do nome.
+                # A correção mais robusta é no seu Excel, mas tentaremos mapear "Unnamed" se for a única opção.
+                
                 if alt_norm in colunas_df_normalizadas:
-                    # Encontrou: Renomeia a coluna original no DataFrame
+                    # Encontrou uma coluna bem nomeada: Renomeia
                     nome_original = colunas_df_normalizadas[alt_norm]
                     df.rename(columns={nome_original: coluna_padrao}, inplace=True)
-                    colunas_mapeadas[coluna_padrao] = nome_original
                     encontrado = True
                     break
+            
+            # Tenta mapear o "Unnamed: X" (exigido pelo seu erro anterior)
+            if not encontrado:
+                 # Se a coluna padrao for 'Data' (que é a primeira), tentamos mapear o Unnamed: 0, etc.
+                 if coluna_padrao == 'Data' and 'UNNAMED:0' in colunas_df_normalizadas:
+                     nome_original = colunas_df_normalizadas['UNNAMED:0']
+                     df.rename(columns={nome_original: 'Data'}, inplace=True)
+                     encontrado = True
+                 elif coluna_padrao == 'Volume_M3' and 'UNNAMED:1' in colunas_df_normalizadas:
+                     nome_original = colunas_df_normalizadas['UNNAMED:1']
+                     df.rename(columns={nome_original: 'Volume_M3'}, inplace=True)
+                     encontrado = True
+                 # Se for a 3ª coluna que precisa (Valor) e ela não tiver nome, tentamos a próxima "Unnamed"
+                 elif coluna_padrao == 'Valor' and 'UNNAMED:2' in colunas_df_normalizadas:
+                     nome_original = colunas_df_normalizadas['UNNAMED:2']
+                     df.rename(columns={nome_original: 'Valor'}, inplace=True)
+                     encontrado = True
+                 # Adicione mais casos se você souber que o Volume e Valor estão em colunas diferentes (ex: Unnamed: 4 e Unnamed: 6)
+                 # Se você quiser nos dizer o índice exato das colunas no Excel, podemos colocar a logica aqui.
+                 # No momento, assumimos: Data = Unnamed: 0, Volume_M3 = Unnamed: 1, Valor = Unnamed: 2.
             
             if not encontrado:
                 colunas_faltantes.append(coluna_padrao)
 
+
         if colunas_faltantes:
             return pd.DataFrame(), colunas_faltantes, colunas_originais
 
-        # 1. Limpeza de dados
+        # 3. Limpeza de dados
         # Converte 'Data' para o formato datetime, ignorando erros
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
         # Remove linhas onde a data é inválida (NaN)
@@ -111,7 +136,7 @@ def carregar_e_processar_dados(uploaded_file):
         df.dropna(subset=['Volume_M3', 'Valor'], inplace=True)
         df = df[(df['Volume_M3'] > 0) & (df['Valor'] > 0)]
 
-        # 2. Criação de Colunas Auxiliares
+        # 4. Criação de Colunas Auxiliares
         
         # Solução robusta para locale: GERA o nome do dia em INGLÊS e depois TRADUZ manualmente.
         df['Dia da Semana'] = df['Data'].dt.day_name().map(TRADUCAO_DIAS)
@@ -119,7 +144,7 @@ def carregar_e_processar_dados(uploaded_file):
         df['Mês/Ano'] = df['Data'].dt.to_period('M').astype(str)
         df['Ano'] = df['Data'].dt.year
 
-        # 3. Ordenação (necessária para os gráficos)
+        # 5. Ordenação (necessária para os gráficos)
         df.sort_values(by='Data', inplace=True)
 
         return df, [], []
@@ -127,36 +152,30 @@ def carregar_e_processar_dados(uploaded_file):
     return pd.DataFrame(), ["Arquivo não enviado"], []
 
 # ===================================================================================
-# 3. FUNÇÕES DE VISUALIZAÇÃO
+# 3. FUNÇÕES DE VISUALIZAÇÃO (Sem mudanças em relação à versão anterior)
 # ===================================================================================
 
 def criar_grafico_dia_semana(df):
     """Cria um gráfico de barras agrupadas de Volume e Valor por Dia da Semana."""
     
-    # Usa a ordem global definida na seção 1
     global ORDEM_DIAS
     
-    # Agrupa por 'Dia da Semana'
     df_agrupado = df.groupby('Dia da Semana').agg(
         {'Volume_M3': 'sum', 'Valor': 'sum'}
-    ).reindex(ORDEM_DIAS).reset_index().fillna(0) # Reordena e preenche NaNs com 0
+    ).reindex(ORDEM_DIAS).reset_index().fillna(0)
 
-    # Adiciona a coluna de Total Geral
     df_agrupado.loc[len(df_agrupado)] = {
         'Dia da Semana': 'Total Geral',
         'Volume_M3': df_agrupado['Volume_M3'].sum(),
         'Valor': df_agrupado['Valor'].sum()
     }
 
-    # Conversão de Valor para string formatada
     df_agrupado['Valor formatado'] = df_agrupado['Valor'].apply(
         lambda x: format_currency(x, CURRENCY_CODE, locale=CURRENCY_LOCALE)
     )
 
-    # Cores
     cor_mapa = {'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR}
 
-    # Criação do gráfico
     fig_dia_semana = px.bar(
         df_agrupado,
         x='Dia da Semana',
@@ -166,49 +185,30 @@ def criar_grafico_dia_semana(df):
         height=500
     )
 
-    # Personalização dos traços
     fig_dia_semana.update_traces(
-        # Rótulos de dados fora das barras
         textposition='outside', 
-        # Aumenta o tamanho da fonte para 14
         textfont=dict(size=14, color='white'), 
-        # Customiza o texto hover
         hovertemplate='Dia: %{x}<br>Volume: %{customdata[0]:,.2f} m³<br>Valor: %{customdata[1]}<extra></extra>',
-        # Dados para o hover
         customdata=np.stack((df_agrupado['Volume_M3'], df_agrupado['Valor formatado']), axis=-1)
     )
 
-    # Personalização do layout
     fig_dia_semana.update_layout(
-        # Remove título do eixo Y
         yaxis_title=None, 
-        # Remove o grid e tick labels do eixo Y
         yaxis=dict(showgrid=False, showticklabels=False, title='Volume (m³) / Valor (R$)'), 
-        # Remove o grid e tick labels do eixo X
         xaxis=dict(showgrid=False, showticklabels=True),
-        # Cor de fundo do gráfico
         plot_bgcolor='rgba(0, 0, 0, 0)', 
-        # Cor do papel
         paper_bgcolor='rgba(0, 0, 0, 0)', 
-        # Cor do título
         title_font_color='white',
-        # Cor da legenda
         legend_title_font_color='white',
-        # Posição da legenda
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
-    # Ajusta o eixo Y para o Volume_M3
-    # A segunda coluna ('Valor') será exibida no eixo Y secundário (já que 'Valor' é muito maior que 'Volume_M3')
     fig_dia_semana.update_yaxes(
-        # Volume_M3 (primeira série)
         title_text="Volume (m³)", secondary_y=False, 
         showgrid=False, showticklabels=False
     )
     
-    # Ajusta o eixo Y para o Valor
     fig_dia_semana.update_yaxes(
-        # Valor (segunda série)
         title_text="Valor (R$)", secondary_y=True, 
         showgrid=False, showticklabels=False
     )
@@ -219,23 +219,18 @@ def criar_grafico_dia_semana(df):
 def criar_grafico_longo_diario(df):
     """Cria um gráfico de barras com o histórico Volume vs Valor ao longo do tempo."""
 
-    # Agrupamento diário
     df_long_diario = df.groupby('Data').agg(
         {'Volume_M3': 'sum', 'Valor': 'sum'}
     ).reset_index()
 
-    # Conversão de Data para string formatada
     df_long_diario['Data formatada'] = df_long_diario['Data'].dt.strftime('%d/%m/%Y')
     
-    # Conversão de Valor para string formatada
     df_long_diario['Valor formatado'] = df_long_diario['Valor'].apply(
         lambda x: format_currency(x, CURRENCY_CODE, locale=CURRENCY_LOCALE)
     )
 
-    # Cores
     cor_mapa = {'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR}
 
-    # Criação do gráfico
     fig_longo_agrupado = px.bar(
         df_long_diario,
         x='Data',
@@ -245,34 +240,21 @@ def criar_grafico_longo_diario(df):
         height=500
     )
 
-    # Personalização dos traços
     fig_longo_agrupado.update_traces(
-        # Posição do texto, tamanho da fonte e cor (fora das barras)
         textposition='outside', 
         textfont=dict(size=14, color='white'), 
-        # Customiza o texto hover
         hovertemplate='Data: %{customdata[0]}<br>Volume: %{customdata[1]:,.2f} m³<br>Valor: %{customdata[2]}<extra></extra>',
-        # Dados para o hover
         customdata=np.stack((df_long_diario['Data formatada'], df_long_diario['Volume_M3'], df_long_diario['Valor formatado']), axis=-1)
     )
 
-    # Personalização do layout
     fig_longo_agrupado.update_layout(
-        # Remove título do eixo Y
         yaxis_title=None, 
-        # Remove o grid e tick labels do eixo Y
         yaxis=dict(showgrid=False, showticklabels=False), 
-        # Remove o grid do eixo X
         xaxis=dict(showgrid=False),
-        # Cor de fundo do gráfico
         plot_bgcolor='rgba(0, 0, 0, 0)', 
-        # Cor do papel
         paper_bgcolor='rgba(0, 0, 0, 0)',
-        # Cor do título
         title_font_color='white',
-        # Cor da legenda
         legend_title_font_color='white',
-        # Posição da legenda
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
     )
 
@@ -292,6 +274,15 @@ uploaded_file = st.sidebar.file_uploader(
     help="O arquivo deve conter as colunas 'Data', 'Volume_M3' (ou 'Qtd.M³') e 'Valor' (ou 'Custo')."
 )
 
+# NOVO CAMPO: Se o cabeçalho não estiver na primeira linha (linha 1 do Excel), o usuário pode ajustar
+header_row_index = st.sidebar.number_input(
+    "Linha do Excel com o Cabeçalho (Começa em 1)", 
+    min_value=1, 
+    value=1, 
+    step=1, 
+    help="Se a sua planilha tiver linhas de título ou espaços antes do cabeçalho real (Data, Volume, Valor), aumente este número. Por exemplo, se o cabeçalho estiver na 3ª linha do Excel, use 3. (Ajuste interno: Linha digitada - 1)."
+)
+
 # Inicializa o DataFrame vazio e a lista de erros
 df_processado = pd.DataFrame()
 colunas_faltantes = ["Nenhum dado processado"]
@@ -300,8 +291,11 @@ dados_carregados = False
 
 # Processamento condicional após o upload do arquivo
 if uploaded_file is not None:
+    # A função read_excel do Pandas usa índice 0-baseado, então subtraímos 1.
+    pandas_header_index = header_row_index - 1 
+
     # Chama a função de processamento
-    df_processado, colunas_faltantes, colunas_originais_lidas = carregar_e_processar_dados(uploaded_file)
+    df_processado, colunas_faltantes, colunas_originais_lidas = carregar_e_processar_dados(uploaded_file, pandas_header_index)
     
     # Verifica se o DataFrame tem dados e se não há colunas faltantes
     if not df_processado.empty and not colunas_faltantes:
