@@ -35,12 +35,14 @@ TRADUCAO_DIAS = {
 }
 ORDEM_DIAS = list(TRADUCAO_DIAS.values()) # Usada para ordenação de gráficos
 
-# Colunas esperadas e suas alternativas mais prováveis (Normalizadas para busca)
-COLUNAS_ESPERADAS = {
-    'Data': ['DATA', 'ROTULOS DE LINHA', 'FIELD1'],
-    'Volume_M3': ['VOLUME_M3', 'QTD.M3', 'M3', 'QUANTIDADE'],
-    'Valor': ['VALOR', 'CUSTO', 'TOTAL', 'REAIS', 'FIELD2']
+# Colunas esperadas e suas alternativas prováveis (Normalizadas para busca)
+# ATUALIZAÇÃO V4: Usando os nomes exatos encontrados no arquivo do usuário:
+COLUNAS_ESPERADAS_E_MAPEAMENTO_FIXO = {
+    'Data': ['RÓTULOS DE LINHA'],
+    'Volume_M3': ['MÉDIA DE QTD.M³ (POTÁVEL)', 'SOMA DE QTD.M³ (POTÁVEL)'],
+    'Valor': ['MÉDIA DE VALOR2']
 }
+
 
 # ===================================================================================
 # 2. FUNÇÕES DE PROCESSAMENTO
@@ -56,8 +58,6 @@ def carregar_e_processar_dados(uploaded_file, header_row):
     if uploaded_file is not None:
         try:
             # Tenta ler o arquivo Excel, usando a linha de cabeçalho especificada
-            # O parâmetro header usa o índice da linha (começando em 0).
-            # Se o usuário indicar 1, o Pandas lê a segunda linha do Excel como cabeçalho.
             df_bruto = pd.read_excel(uploaded_file, header=header_row)
         except Exception as e:
             st.error(f"Erro ao ler o arquivo Excel. Detalhe: {e}")
@@ -70,63 +70,44 @@ def carregar_e_processar_dados(uploaded_file, header_row):
         colunas_originais = list(df.columns)
 
         colunas_faltantes = []
+        colunas_mapeadas = {}
 
         # 1. Normaliza as colunas do DataFrame para facilitar a busca (uppercase, sem espaços/pontos/acento)
         colunas_df_normalizadas = {
-            # Cria a chave normalizada (ex: 'VOLUME_M3') -> valor (nome da coluna original 'Volume M3')
-            str(col).upper().replace(' ', '').replace('.', '').replace('³', '3'): col 
+            # Cria a chave normalizada (ex: 'MEDIADEVALOR2') -> valor (nome da coluna original 'Média de VALOR2')
+            str(col).upper().replace(' ', '').replace('.', '').replace('³', '3').replace('Ê', 'E').replace('Á', 'A'): col 
             for col in df.columns
         }
         
-        # 2. Tenta mapear as colunas
-        for coluna_padrao, alternativas in COLUNAS_ESPERADAS.items():
+        # 2. Tenta mapear as colunas usando os nomes fixos do arquivo do usuário
+        for coluna_padrao, alternativas in COLUNAS_ESPERADAS_E_MAPEAMENTO_FIXO.items():
             encontrado = False
             for alt in alternativas:
                 # Normaliza a alternativa para busca
-                alt_norm = alt.upper().replace(' ', '').replace('.', '').replace('³', '3')
-                
-                # O problema estava aqui: o nome da coluna original é Unnamed: X, mas o conteúdo é que importa.
-                # Como não temos como saber o conteúdo da célula na linha 0, temos que depender do nome.
-                # A correção mais robusta é no seu Excel, mas tentaremos mapear "Unnamed" se for a única opção.
+                alt_norm = alt.upper().replace(' ', '').replace('.', '').replace('³', '3').replace('Ê', 'E').replace('Á', 'A')
                 
                 if alt_norm in colunas_df_normalizadas:
-                    # Encontrou uma coluna bem nomeada: Renomeia
+                    # Encontrou uma coluna: Adiciona ao mapeamento e renomeia
                     nome_original = colunas_df_normalizadas[alt_norm]
-                    df.rename(columns={nome_original: coluna_padrao}, inplace=True)
+                    colunas_mapeadas[nome_original] = coluna_padrao
                     encontrado = True
                     break
-            
-            # Tenta mapear o "Unnamed: X" (exigido pelo seu erro anterior)
-            if not encontrado:
-                 # Se a coluna padrao for 'Data' (que é a primeira), tentamos mapear o Unnamed: 0, etc.
-                 if coluna_padrao == 'Data' and 'UNNAMED:0' in colunas_df_normalizadas:
-                     nome_original = colunas_df_normalizadas['UNNAMED:0']
-                     df.rename(columns={nome_original: 'Data'}, inplace=True)
-                     encontrado = True
-                 elif coluna_padrao == 'Volume_M3' and 'UNNAMED:1' in colunas_df_normalizadas:
-                     nome_original = colunas_df_normalizadas['UNNAMED:1']
-                     df.rename(columns={nome_original: 'Volume_M3'}, inplace=True)
-                     encontrado = True
-                 # Se for a 3ª coluna que precisa (Valor) e ela não tiver nome, tentamos a próxima "Unnamed"
-                 elif coluna_padrao == 'Valor' and 'UNNAMED:2' in colunas_df_normalizadas:
-                     nome_original = colunas_df_normalizadas['UNNAMED:2']
-                     df.rename(columns={nome_original: 'Valor'}, inplace=True)
-                     encontrado = True
-                 # Adicione mais casos se você souber que o Volume e Valor estão em colunas diferentes (ex: Unnamed: 4 e Unnamed: 6)
-                 # Se você quiser nos dizer o índice exato das colunas no Excel, podemos colocar a logica aqui.
-                 # No momento, assumimos: Data = Unnamed: 0, Volume_M3 = Unnamed: 1, Valor = Unnamed: 2.
             
             if not encontrado:
                 colunas_faltantes.append(coluna_padrao)
 
 
+        # Se alguma coluna essencial estiver faltando, retorna erro
         if colunas_faltantes:
             return pd.DataFrame(), colunas_faltantes, colunas_originais
+        
+        # Executa o renomeamento após verificar todas as colunas
+        df.rename(columns=colunas_mapeadas, inplace=True)
 
         # 3. Limpeza de dados
         # Converte 'Data' para o formato datetime, ignorando erros
         df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
-        # Remove linhas onde a data é inválida (NaN)
+        # Remove linhas onde a data é inválida (NaN). Isso garante que 'Rótulos de Linha' seja a data.
         df.dropna(subset=['Data'], inplace=True)
         
         # Converte 'Volume_M3' e 'Valor' para números, ignorando erros
@@ -152,7 +133,7 @@ def carregar_e_processar_dados(uploaded_file, header_row):
     return pd.DataFrame(), ["Arquivo não enviado"], []
 
 # ===================================================================================
-# 3. FUNÇÕES DE VISUALIZAÇÃO (Sem mudanças em relação à versão anterior)
+# 3. FUNÇÕES DE VISUALIZAÇÃO
 # ===================================================================================
 
 def criar_grafico_dia_semana(df):
