@@ -48,34 +48,47 @@ def carregar_e_processar_dados(uploaded_file):
     """
     if uploaded_file is not None:
         try:
-            # Tenta ler o arquivo Excel (openpyxl é usado por baixo dos panos)
+            # Tenta ler o arquivo Excel (openpyxl é usado por baixo dos panros)
             df_bruto = pd.read_excel(uploaded_file)
         except Exception as e:
             st.error(f"Erro ao ler o arquivo Excel: Verifique se o arquivo está no formato XLSX e não está corrompido. Detalhe: {e}")
-            return pd.DataFrame(), ["Erro de Leitura"]
+            return pd.DataFrame(), ["Erro de Leitura"], []
 
-        # Colunas esperadas: 'Data', 'Volume_M3', 'Valor'
+        # Colunas esperadas e suas alternativas mais prováveis
         colunas_esperadas = {
-            'Data': ['Data', 'DATE', 'Rótulos de Linha'],
-            'Volume_M3': ['Volume_M3', 'Qtd.M³', 'Metros Cúbicos'],
-            'Valor': ['Valor', 'Custo', 'Total']
+            'Data': ['Data', 'DATE', 'ROTULOS DE LINHA'],
+            'Volume_M3': ['VOLUME_M3', 'QTD.M3', 'METROS CUBICOS', 'M3'],
+            'Valor': ['VALOR', 'CUSTO', 'TOTAL', 'REAIS']
         }
         
         df = df_bruto.copy()
-        colunas_encontradas = {}
-        colunas_faltantes = []
+        
+        # Lista de nomes de colunas originais do arquivo (para diagnóstico)
+        colunas_originais = list(df.columns)
 
-        # Tenta mapear as colunas
+        colunas_faltantes = []
+        colunas_mapeadas = {}
+
+        # Mapeamento robusto: normaliza nomes de colunas para facilitar a busca
+        
+        # 1. Normaliza as colunas do DataFrame para buscar (uppercase, sem espaços/pontos/acento)
+        colunas_df_normalizadas = {
+            col.upper().replace(' ', '').replace('.', '').replace('³', '3'): col 
+            for col in df.columns
+        }
+        
+        # 2. Tenta mapear as colunas
         for coluna_padrao, alternativas in colunas_esperadas.items():
             encontrado = False
             for alt in alternativas:
-                # Normaliza o nome da coluna para comparação (remove acentos, maiúsculas/minúsculas)
-                colunas_df = {c.replace('.', '').replace(' ', '').upper(): c for c in df.columns}
-                alt_norm = alt.replace('.', '').replace(' ', '').upper()
+                # Normaliza a alternativa para busca
+                alt_norm = alt.upper().replace(' ', '').replace('.', '').replace('³', '3')
                 
-                if alt_norm in colunas_df:
-                    df.rename(columns={colunas_df[alt_norm]: coluna_padrao}, inplace=True)
-                    colunas_encontradas[coluna_padrao] = True
+                if alt_norm in colunas_df_normalizadas:
+                    # Encontrou: Renomeia a coluna original no DataFrame
+                    nome_original = colunas_df_normalizadas[alt_norm]
+                    df.rename(columns={nome_original: coluna_padrao}, inplace=True)
+                    colunas_mapeadas[coluna_padrao] = nome_original
                     encontrado = True
                     break
             
@@ -83,7 +96,7 @@ def carregar_e_processar_dados(uploaded_file):
                 colunas_faltantes.append(coluna_padrao)
 
         if colunas_faltantes:
-            return pd.DataFrame(), colunas_faltantes
+            return pd.DataFrame(), colunas_faltantes, colunas_originais
 
         # 1. Limpeza de dados
         # Converte 'Data' para o formato datetime, ignorando erros
@@ -100,8 +113,7 @@ def carregar_e_processar_dados(uploaded_file):
 
         # 2. Criação de Colunas Auxiliares
         
-        # Correção CRÍTICA: GERA o nome do dia em INGLÊS e depois TRADUZ manualmente.
-        # Isso evita o erro de 'locale' no servidor Streamlit Cloud.
+        # Solução robusta para locale: GERA o nome do dia em INGLÊS e depois TRADUZ manualmente.
         df['Dia da Semana'] = df['Data'].dt.day_name().map(TRADUCAO_DIAS)
         
         df['Mês/Ano'] = df['Data'].dt.to_period('M').astype(str)
@@ -110,9 +122,9 @@ def carregar_e_processar_dados(uploaded_file):
         # 3. Ordenação (necessária para os gráficos)
         df.sort_values(by='Data', inplace=True)
 
-        return df, []
+        return df, [], []
     
-    return pd.DataFrame(), ["Arquivo não enviado"]
+    return pd.DataFrame(), ["Arquivo não enviado"], []
 
 # ===================================================================================
 # 3. FUNÇÕES DE VISUALIZAÇÃO
@@ -283,12 +295,13 @@ uploaded_file = st.sidebar.file_uploader(
 # Inicializa o DataFrame vazio e a lista de erros
 df_processado = pd.DataFrame()
 colunas_faltantes = ["Nenhum dado processado"]
+colunas_originais_lidas = []
 dados_carregados = False
 
 # Processamento condicional após o upload do arquivo
 if uploaded_file is not None:
     # Chama a função de processamento
-    df_processado, colunas_faltantes = carregar_e_processar_dados(uploaded_file)
+    df_processado, colunas_faltantes, colunas_originais_lidas = carregar_e_processar_dados(uploaded_file)
     
     # Verifica se o DataFrame tem dados e se não há colunas faltantes
     if not df_processado.empty and not colunas_faltantes:
@@ -309,7 +322,7 @@ elif not dados_carregados:
     if "Erro de Leitura" in colunas_faltantes:
         st.warning("Não foi possível ler o arquivo. Certifique-se de que é um arquivo Excel (.xlsx) válido e não está protegido por senha.")
     elif colunas_faltantes and colunas_faltantes[0] != "Arquivo não enviado":
-        st.warning(f"O arquivo foi carregado, mas as colunas necessárias estão faltando ou não foram reconhecidas. Colunas esperadas: {', '.join(colunas_faltantes)} (ou equivalentes como 'Qtd.M³' e 'Custo').")
+        st.warning(f"O arquivo foi carregado, mas as colunas necessárias estão faltando ou não foram reconhecidas. Colunas esperadas: Data, Volume_M3, Valor. Nomes de colunas lidas no seu arquivo: {', '.join(colunas_originais_lidas)}")
     elif df_processado.empty:
         st.warning("O arquivo foi carregado, mas o DataFrame está vazio após o processamento (filtros de data/valor). Verifique se as colunas 'Data', 'Volume_M3' e 'Valor' (ou equivalentes) estão preenchidas corretamente e contêm valores maiores que zero.")
     
