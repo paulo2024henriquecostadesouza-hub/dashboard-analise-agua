@@ -36,11 +36,13 @@ TRADUCAO_DIAS = {
 ORDEM_DIAS = list(TRADUCAO_DIAS.values()) # Usada para ordenação de gráficos
 
 # Colunas esperadas e suas alternativas prováveis (Normalizadas para busca)
-# ATUALIZAÇÃO V4: Usando os nomes exatos encontrados no arquivo do usuário:
+# ATUALIZADO V6: Inclui os nomes exatos 'Rótulos de Linha', 'Qtd.M³' e 'Custo'
 COLUNAS_ESPERADAS_E_MAPEAMENTO_FIXO = {
-    'Data': ['RÓTULOS DE LINHA'],
-    'Volume_M3': ['MÉDIA DE QTD.M³ (POTÁVEL)', 'SOMA DE QTD.M³ (POTÁVEL)'],
-    'Valor': ['MÉDIA DE VALOR2']
+    'Data': ['RÓTULOS DE LINHA', 'Rótulos de Linha'],
+    # Adicionando 'QTD.M³' como alternativa para Volume_M3
+    'Volume_M3': ['MÉDIA DE QTD.M³ (POTÁVEL)', 'SOMA DE QTD.M³ (POTÁVEL)', 'QTD.M³', 'Qtd.M³'], 
+    # Adicionando 'CUSTO' como alternativa para Valor
+    'Valor': ['MÉDIA DE VALOR2', 'CUSTO', 'Custo']
 }
 
 
@@ -50,15 +52,20 @@ COLUNAS_ESPERADAS_E_MAPEAMENTO_FIXO = {
 
 # Cache para evitar recarregar o arquivo Excel toda vez
 @st.cache_data
-def carregar_e_processar_dados(uploaded_file, header_row):
+def carregar_e_processar_dados(uploaded_file, header_row, sheet_name):
     """
     Carrega o arquivo Excel, limpa e processa os dados brutos.
     O parâmetro header_row indica qual linha do Excel contém o cabeçalho (começa em 0).
+    O parâmetro sheet_name indica o nome da aba a ser lida.
     """
     if uploaded_file is not None:
         try:
-            # Tenta ler o arquivo Excel, usando a linha de cabeçalho especificada
-            df_bruto = pd.read_excel(uploaded_file, header=header_row)
+            # Tenta ler o arquivo Excel, usando a linha de cabeçalho e o NOME da aba especificada
+            df_bruto = pd.read_excel(uploaded_file, header=header_row, sheet_name=sheet_name)
+        except ValueError as ve:
+             # Este erro geralmente ocorre se o nome da aba estiver errado
+            st.error(f"Erro: O nome da aba ('{sheet_name}') não foi encontrado no arquivo Excel. Verifique se digitou o nome corretamente (sensível a maiúsculas/minúsculas e espaços).")
+            return pd.DataFrame(), ["Erro de Nome de Aba"], []
         except Exception as e:
             st.error(f"Erro ao ler o arquivo Excel. Detalhe: {e}")
             return pd.DataFrame(), ["Erro de Leitura"], []
@@ -111,8 +118,14 @@ def carregar_e_processar_dados(uploaded_file, header_row):
         df.dropna(subset=['Data'], inplace=True)
         
         # Converte 'Volume_M3' e 'Valor' para números, ignorando erros
+        # Tenta converter o Volume, substituindo a vírgula por ponto para garantir que seja um decimal
+        df['Volume_M3'] = df['Volume_M3'].astype(str).str.replace(',', '.', regex=False)
         df['Volume_M3'] = pd.to_numeric(df['Volume_M3'], errors='coerce')
+        
+        # Tenta converter o Valor, removendo 'R$' e substituindo a vírgula por ponto (se for o caso)
+        df['Valor'] = df['Valor'].astype(str).str.replace('R$', '', regex=False).str.replace(',', '.', regex=False)
         df['Valor'] = pd.to_numeric(df['Valor'], errors='coerce')
+        
         # Remove linhas onde Volume_M3 ou Valor são NaN ou zero (dados irrelevantes)
         df.dropna(subset=['Volume_M3', 'Valor'], inplace=True)
         df = df[(df['Volume_M3'] > 0) & (df['Valor'] > 0)]
@@ -133,7 +146,7 @@ def carregar_e_processar_dados(uploaded_file, header_row):
     return pd.DataFrame(), ["Arquivo não enviado"], []
 
 # ===================================================================================
-# 3. FUNÇÕES DE VISUALIZAÇÃO
+# 3. FUNÇÕES DE VISUALIZAÇÃO (Sem alterações)
 # ===================================================================================
 
 def criar_grafico_dia_semana(df):
@@ -145,11 +158,8 @@ def criar_grafico_dia_semana(df):
         {'Volume_M3': 'sum', 'Valor': 'sum'}
     ).reindex(ORDEM_DIAS).reset_index().fillna(0)
 
-    df_agrupado.loc[len(df_agrupado)] = {
-        'Dia da Semana': 'Total Geral',
-        'Volume_M3': df_agrupado['Volume_M3'].sum(),
-        'Valor': df_agrupado['Valor'].sum()
-    }
+    # Nota: Removi a linha 'Total Geral' do gráfico para evitar distorção visual na escala
+    # e mantive apenas a soma do Volume e Valor nos KPIs gerais.
 
     df_agrupado['Valor formatado'] = df_agrupado['Valor'].apply(
         lambda x: format_currency(x, CURRENCY_CODE, locale=CURRENCY_LOCALE)
@@ -167,7 +177,7 @@ def criar_grafico_dia_semana(df):
     )
 
     fig_dia_semana.update_traces(
-        textposition='outside', 
+        # textposition='outside', # Removido para evitar sobreposição em barras menores
         textfont=dict(size=14, color='white'), 
         hovertemplate='Dia: %{x}<br>Volume: %{customdata[0]:,.2f} m³<br>Valor: %{customdata[1]}<extra></extra>',
         customdata=np.stack((df_agrupado['Volume_M3'], df_agrupado['Valor formatado']), axis=-1)
@@ -175,23 +185,13 @@ def criar_grafico_dia_semana(df):
 
     fig_dia_semana.update_layout(
         yaxis_title=None, 
-        yaxis=dict(showgrid=False, showticklabels=False, title='Volume (m³) / Valor (R$)'), 
+        yaxis=dict(showgrid=False, showticklabels=True, title='Volume (m³) / Valor (R$)'), 
         xaxis=dict(showgrid=False, showticklabels=True),
         plot_bgcolor='rgba(0, 0, 0, 0)', 
         paper_bgcolor='rgba(0, 0, 0, 0)', 
         title_font_color='white',
         legend_title_font_color='white',
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-    )
-
-    fig_dia_semana.update_yaxes(
-        title_text="Volume (m³)", secondary_y=False, 
-        showgrid=False, showticklabels=False
-    )
-    
-    fig_dia_semana.update_yaxes(
-        title_text="Valor (R$)", secondary_y=True, 
-        showgrid=False, showticklabels=False
     )
 
     st.plotly_chart(fig_dia_semana, use_container_width=True)
@@ -222,7 +222,7 @@ def criar_grafico_longo_diario(df):
     )
 
     fig_longo_agrupado.update_traces(
-        textposition='outside', 
+        # textposition='outside', # Removido para evitar sobreposição em barras menores
         textfont=dict(size=14, color='white'), 
         hovertemplate='Data: %{customdata[0]}<br>Volume: %{customdata[1]:,.2f} m³<br>Valor: %{customdata[2]}<extra></extra>',
         customdata=np.stack((df_long_diario['Data formatada'], df_long_diario['Volume_M3'], df_long_diario['Valor formatado']), axis=-1)
@@ -230,7 +230,7 @@ def criar_grafico_longo_diario(df):
 
     fig_longo_agrupado.update_layout(
         yaxis_title=None, 
-        yaxis=dict(showgrid=False, showticklabels=False), 
+        yaxis=dict(showgrid=False, showticklabels=True), 
         xaxis=dict(showgrid=False),
         plot_bgcolor='rgba(0, 0, 0, 0)', 
         paper_bgcolor='rgba(0, 0, 0, 0)',
@@ -255,13 +255,20 @@ uploaded_file = st.sidebar.file_uploader(
     help="O arquivo deve conter as colunas 'Data', 'Volume_M3' (ou 'Qtd.M³') e 'Valor' (ou 'Custo')."
 )
 
-# NOVO CAMPO: Se o cabeçalho não estiver na primeira linha (linha 1 do Excel), o usuário pode ajustar
+# NOVO CAMPO: Nome da aba
+sheet_name = st.sidebar.text_input(
+    "Nome da Aba (Sheet Name)", 
+    value="Dados Dashboard", # Valor padrão alterado para "Dados Dashboard" (com base na sua imagem)
+    help="Digite o nome exato da aba do Excel que contém os dados (ex: 'Sheet1', 'Dados Dashboard'). É sensível a maiúsculas/minúsculas."
+)
+
+# Campo de Linha de Cabeçalho
 header_row_index = st.sidebar.number_input(
     "Linha do Excel com o Cabeçalho (Começa em 1)", 
     min_value=1, 
     value=1, 
     step=1, 
-    help="Se a sua planilha tiver linhas de título ou espaços antes do cabeçalho real (Data, Volume, Valor), aumente este número. Por exemplo, se o cabeçalho estiver na 3ª linha do Excel, use 3. (Ajuste interno: Linha digitada - 1)."
+    help="Se a planilha tiver linhas de título ou espaços antes do cabeçalho real (Data, Volume, Valor), aumente este número. Ex: se o cabeçalho estiver na 3ª linha do Excel, use 3. (Ajuste interno: Linha digitada - 1)."
 )
 
 # Inicializa o DataFrame vazio e a lista de erros
@@ -275,8 +282,8 @@ if uploaded_file is not None:
     # A função read_excel do Pandas usa índice 0-baseado, então subtraímos 1.
     pandas_header_index = header_row_index - 1 
 
-    # Chama a função de processamento
-    df_processado, colunas_faltantes, colunas_originais_lidas = carregar_e_processar_dados(uploaded_file, pandas_header_index)
+    # Chama a função de processamento com o novo parâmetro sheet_name
+    df_processado, colunas_faltantes, colunas_originais_lidas = carregar_e_processar_dados(uploaded_file, pandas_header_index, sheet_name)
     
     # Verifica se o DataFrame tem dados e se não há colunas faltantes
     if not df_processado.empty and not colunas_faltantes:
@@ -294,11 +301,13 @@ elif not dados_carregados:
     st.error(f"Erro ao carregar ou processar os dados. Verifique a estrutura do seu arquivo.")
     
     # Mensagem específica para colunas faltantes
-    if "Erro de Leitura" in colunas_faltantes:
+    if "Erro de Nome de Aba" in colunas_faltantes:
+        st.warning(f"Por favor, verifique se o nome da aba '{sheet_name}' está correto.")
+    elif "Erro de Leitura" in colunas_faltantes:
         st.warning("Não foi possível ler o arquivo. Certifique-se de que é um arquivo Excel (.xlsx) válido e não está protegido por senha.")
     elif colunas_faltantes and colunas_faltantes[0] != "Arquivo não enviado":
-        st.warning(f"O arquivo foi carregado, mas as colunas necessárias estão faltando ou não foram reconhecidas. Colunas esperadas: Data, Volume_M3, Valor. Nomes de colunas lidas no seu arquivo: {', '.join(colunas_originais_lidas)}")
-    elif df_processado.empty:
+        st.warning(f"O arquivo foi carregado, mas as colunas necessárias estão faltando ou não foram reconhecidas. Colunas esperadas: Data, Volume_M3, Valor. Nomes de colunas lidas na aba '{sheet_name}': {', '.join([str(c) for c in colunas_originais_lidas])}")
+    elif df_processado.empty and uploaded_file is not None:
         st.warning("O arquivo foi carregado, mas o DataFrame está vazio após o processamento (filtros de data/valor). Verifique se as colunas 'Data', 'Volume_M3' e 'Valor' (ou equivalentes) estão preenchidas corretamente e contêm valores maiores que zero.")
     
     # Se houver dados brutos (após erro), exibe a inspeção
