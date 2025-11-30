@@ -23,6 +23,18 @@ CURRENCY_CODE = 'BRL'
 COR_AZUL_VOLUME = '#29C5F6'
 COR_VERDE_VALOR = '#6AD44D'
 
+# Dicionário de tradução para os dias da semana (para evitar erro de locale no Streamlit Cloud)
+TRADUCAO_DIAS = {
+    'Monday': 'Segunda-feira',
+    'Tuesday': 'Terça-feira',
+    'Wednesday': 'Quarta-feira',
+    'Thursday': 'Quinta-feira',
+    'Friday': 'Sexta-feira',
+    'Saturday': 'Sábado',
+    'Sunday': 'Domingo'
+}
+ORDEM_DIAS = list(TRADUCAO_DIAS.values()) # Usada para ordenação de gráficos
+
 # ===================================================================================
 # 2. FUNÇÕES DE PROCESSAMENTO
 # ===================================================================================
@@ -87,7 +99,11 @@ def carregar_e_processar_dados(uploaded_file):
         df = df[(df['Volume_M3'] > 0) & (df['Valor'] > 0)]
 
         # 2. Criação de Colunas Auxiliares
-        df['Dia da Semana'] = df['Data'].dt.day_name(locale=CURRENCY_LOCALE) # pt_BR
+        
+        # Correção CRÍTICA: GERA o nome do dia em INGLÊS e depois TRADUZ manualmente.
+        # Isso evita o erro de 'locale' no servidor Streamlit Cloud.
+        df['Dia da Semana'] = df['Data'].dt.day_name().map(TRADUCAO_DIAS)
+        
         df['Mês/Ano'] = df['Data'].dt.to_period('M').astype(str)
         df['Ano'] = df['Data'].dt.year
 
@@ -105,16 +121,13 @@ def carregar_e_processar_dados(uploaded_file):
 def criar_grafico_dia_semana(df):
     """Cria um gráfico de barras agrupadas de Volume e Valor por Dia da Semana."""
     
-    # Mapeamento para ordenar corretamente os dias da semana
-    ordem_dias = [
-        'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 
-        'Sexta-feira', 'Sábado', 'Domingo'
-    ]
+    # Usa a ordem global definida na seção 1
+    global ORDEM_DIAS
     
     # Agrupa por 'Dia da Semana'
     df_agrupado = df.groupby('Dia da Semana').agg(
         {'Volume_M3': 'sum', 'Valor': 'sum'}
-    ).reindex(ordem_dias).reset_index().fillna(0) # Reordena e preenche NaNs com 0
+    ).reindex(ORDEM_DIAS).reset_index().fillna(0) # Reordena e preenche NaNs com 0
 
     # Adiciona a coluna de Total Geral
     df_agrupado.loc[len(df_agrupado)] = {
