@@ -4,262 +4,361 @@ import plotly.express as px
 import numpy as np
 from babel.numbers import format_currency # Importa a função de formatação de moeda
 
-# --- Funções de Ajuda ---
+# ===================================================================================
+# 1. CONFIGURAÇÃO DA PÁGINA E VARIÁVEIS GLOBAIS
+# ===================================================================================
 
+st.set_page_config(
+    page_title="Dashboard Análise de Água",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Definir a formatação da moeda brasileira (RS) para o Babel
+CURRENCY_LOCALE = 'pt_BR'
+CURRENCY_SYMBOL = 'R$'
+CURRENCY_CODE = 'BRL'
+
+# Definir cores
+COR_AZUL_VOLUME = '#29C5F6'
+COR_VERDE_VALOR = '#6AD44D'
+
+# ===================================================================================
+# 2. FUNÇÕES DE PROCESSAMENTO
+# ===================================================================================
+
+# Cache para evitar recarregar o arquivo Excel toda vez
 @st.cache_data
-def load_data(uploaded_file):
-    """Carrega o arquivo Excel e faz um pré-processamento básico."""
-    try:
-        df = pd.read_excel(uploaded_file)
+def carregar_e_processar_dados(uploaded_file):
+    """
+    Carrega o arquivo Excel, limpa e processa os dados brutos.
+    Retorna o DataFrame processado e uma lista de colunas faltantes.
+    """
+    if uploaded_file is not None:
+        try:
+            # Tenta ler o arquivo Excel (openpyxl é usado por baixo dos panos)
+            df_bruto = pd.read_excel(uploaded_file)
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo Excel: Verifique se o arquivo está no formato XLSX e não está corrompido. Detalhe: {e}")
+            return pd.DataFrame(), ["Erro de Leitura"]
+
+        # Colunas esperadas: 'Data', 'Volume_M3', 'Valor'
+        colunas_esperadas = {
+            'Data': ['Data', 'DATE', 'Rótulos de Linha'],
+            'Volume_M3': ['Volume_M3', 'Qtd.M³', 'Metros Cúbicos'],
+            'Valor': ['Valor', 'Custo', 'Total']
+        }
         
-        # Renomear as colunas para facilitar o uso
-        df.columns = ['Data', 'FORNECEDOR', 'Volume_M3', 'Valor']
+        df = df_bruto.copy()
+        colunas_encontradas = {}
+        colunas_faltantes = []
+
+        # Tenta mapear as colunas
+        for coluna_padrao, alternativas in colunas_esperadas.items():
+            encontrado = False
+            for alt in alternativas:
+                # Normaliza o nome da coluna para comparação (remove acentos, maiúsculas/minúsculas)
+                colunas_df = {c.replace('.', '').replace(' ', '').upper(): c for c in df.columns}
+                alt_norm = alt.replace('.', '').replace(' ', '').upper()
+                
+                if alt_norm in colunas_df:
+                    df.rename(columns={colunas_df[alt_norm]: coluna_padrao}, inplace=True)
+                    colunas_encontradas[coluna_padrao] = True
+                    encontrado = True
+                    break
+            
+            if not encontrado:
+                colunas_faltantes.append(coluna_padrao)
+
+        if colunas_faltantes:
+            return pd.DataFrame(), colunas_faltantes
+
+        # 1. Limpeza de dados
+        # Converte 'Data' para o formato datetime, ignorando erros
+        df['Data'] = pd.to_datetime(df['Data'], errors='coerce')
+        # Remove linhas onde a data é inválida (NaN)
+        df.dropna(subset=['Data'], inplace=True)
         
-        # Limpeza e conversão de tipos
-        df['Data'] = pd.to_datetime(df['Data'], errors='coerce', dayfirst=True)
+        # Converte 'Volume_M3' e 'Valor' para números, ignorando erros
         df['Volume_M3'] = pd.to_numeric(df['Volume_M3'], errors='coerce')
         df['Valor'] = pd.to_numeric(df['Valor'], errors='coerce')
-        
-        df = df.dropna(subset=['Data', 'Volume_M3', 'Valor'])
-        df['Dia_Semana'] = df['Data'].dt.day_name(locale='pt_BR') # Tenta usar pt_BR para nomes de dias
-        
-        return df
-    except Exception as e:
-        st.error(f"Erro ao carregar ou processar os dados: {e}")
-        return pd.DataFrame()
+        # Remove linhas onde Volume_M3 ou Valor são NaN ou zero (dados irrelevantes)
+        df.dropna(subset=['Volume_M3', 'Valor'], inplace=True)
+        df = df[(df['Volume_M3'] > 0) & (df['Valor'] > 0)]
 
-# Função de formatação para Real (R$) usando Babel
-def format_real(value):
-    """Formata um número como moeda brasileira (R$)."""
-    # Usa 'pt_BR' para formatação e 'BRL' para o símbolo da moeda
-    return format_currency(value, 'BRL', locale='pt_BR')
+        # 2. Criação de Colunas Auxiliares
+        df['Dia da Semana'] = df['Data'].dt.day_name(locale=CURRENCY_LOCALE) # pt_BR
+        df['Mês/Ano'] = df['Data'].dt.to_period('M').astype(str)
+        df['Ano'] = df['Data'].dt.year
 
-# --- Constantes de Cores ---
-COR_VOLUME = '#1f77b4'  # Azul
-COR_VALOR = '#2ca02c'   # Verde
-COR_VERDE_VALOR = '#2ca02c'
-COR_AZUL_VOLUME = '#1f77b4'
+        # 3. Ordenação (necessária para os gráficos)
+        df.sort_values(by='Data', inplace=True)
 
-# --- Configuração da Página ---
-st.set_page_config(layout="wide", page_title="Dashboard Análise de Água")
+        return df, []
+    
+    return pd.DataFrame(), ["Arquivo não enviado"]
+
+# ===================================================================================
+# 3. FUNÇÕES DE VISUALIZAÇÃO
+# ===================================================================================
+
+def criar_grafico_dia_semana(df):
+    """Cria um gráfico de barras agrupadas de Volume e Valor por Dia da Semana."""
+    
+    # Mapeamento para ordenar corretamente os dias da semana
+    ordem_dias = [
+        'Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 
+        'Sexta-feira', 'Sábado', 'Domingo'
+    ]
+    
+    # Agrupa por 'Dia da Semana'
+    df_agrupado = df.groupby('Dia da Semana').agg(
+        {'Volume_M3': 'sum', 'Valor': 'sum'}
+    ).reindex(ordem_dias).reset_index().fillna(0) # Reordena e preenche NaNs com 0
+
+    # Adiciona a coluna de Total Geral
+    df_agrupado.loc[len(df_agrupado)] = {
+        'Dia da Semana': 'Total Geral',
+        'Volume_M3': df_agrupado['Volume_M3'].sum(),
+        'Valor': df_agrupado['Valor'].sum()
+    }
+
+    # Conversão de Valor para string formatada
+    df_agrupado['Valor formatado'] = df_agrupado['Valor'].apply(
+        lambda x: format_currency(x, CURRENCY_CODE, locale=CURRENCY_LOCALE)
+    )
+
+    # Cores
+    cor_mapa = {'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR}
+
+    # Criação do gráfico
+    fig_dia_semana = px.bar(
+        df_agrupado,
+        x='Dia da Semana',
+        y=['Volume_M3', 'Valor'],
+        title='Volume (m³) e Valor (R$) por Dia da Semana',
+        color_discrete_map=cor_mapa,
+        height=500
+    )
+
+    # Personalização dos traços
+    fig_dia_semana.update_traces(
+        # Rótulos de dados fora das barras
+        textposition='outside', 
+        # Aumenta o tamanho da fonte para 14
+        textfont=dict(size=14, color='white'), 
+        # Customiza o texto hover
+        hovertemplate='Dia: %{x}<br>Volume: %{customdata[0]:,.2f} m³<br>Valor: %{customdata[1]}<extra></extra>',
+        # Dados para o hover
+        customdata=np.stack((df_agrupado['Volume_M3'], df_agrupado['Valor formatado']), axis=-1)
+    )
+
+    # Personalização do layout
+    fig_dia_semana.update_layout(
+        # Remove título do eixo Y
+        yaxis_title=None, 
+        # Remove o grid e tick labels do eixo Y
+        yaxis=dict(showgrid=False, showticklabels=False, title='Volume (m³) / Valor (R$)'), 
+        # Remove o grid e tick labels do eixo X
+        xaxis=dict(showgrid=False, showticklabels=True),
+        # Cor de fundo do gráfico
+        plot_bgcolor='rgba(0, 0, 0, 0)', 
+        # Cor do papel
+        paper_bgcolor='rgba(0, 0, 0, 0)', 
+        # Cor do título
+        title_font_color='white',
+        # Cor da legenda
+        legend_title_font_color='white',
+        # Posição da legenda
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    # Ajusta o eixo Y para o Volume_M3
+    # A segunda coluna ('Valor') será exibida no eixo Y secundário (já que 'Valor' é muito maior que 'Volume_M3')
+    fig_dia_semana.update_yaxes(
+        # Volume_M3 (primeira série)
+        title_text="Volume (m³)", secondary_y=False, 
+        showgrid=False, showticklabels=False
+    )
+    
+    # Ajusta o eixo Y para o Valor
+    fig_dia_semana.update_yaxes(
+        # Valor (segunda série)
+        title_text="Valor (R$)", secondary_y=True, 
+        showgrid=False, showticklabels=False
+    )
+
+    st.plotly_chart(fig_dia_semana, use_container_width=True)
+
+
+def criar_grafico_longo_diario(df):
+    """Cria um gráfico de barras com o histórico Volume vs Valor ao longo do tempo."""
+
+    # Agrupamento diário
+    df_long_diario = df.groupby('Data').agg(
+        {'Volume_M3': 'sum', 'Valor': 'sum'}
+    ).reset_index()
+
+    # Conversão de Data para string formatada
+    df_long_diario['Data formatada'] = df_long_diario['Data'].dt.strftime('%d/%m/%Y')
+    
+    # Conversão de Valor para string formatada
+    df_long_diario['Valor formatado'] = df_long_diario['Valor'].apply(
+        lambda x: format_currency(x, CURRENCY_CODE, locale=CURRENCY_LOCALE)
+    )
+
+    # Cores
+    cor_mapa = {'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR}
+
+    # Criação do gráfico
+    fig_longo_agrupado = px.bar(
+        df_long_diario,
+        x='Data',
+        y=['Volume_M3', 'Valor'],
+        title='Análise Diária de Volume (m³) e Valor Gasto (R$)',
+        color_discrete_map=cor_mapa,
+        height=500
+    )
+
+    # Personalização dos traços
+    fig_longo_agrupado.update_traces(
+        # Posição do texto, tamanho da fonte e cor (fora das barras)
+        textposition='outside', 
+        textfont=dict(size=14, color='white'), 
+        # Customiza o texto hover
+        hovertemplate='Data: %{customdata[0]}<br>Volume: %{customdata[1]:,.2f} m³<br>Valor: %{customdata[2]}<extra></extra>',
+        # Dados para o hover
+        customdata=np.stack((df_long_diario['Data formatada'], df_long_diario['Volume_M3'], df_long_diario['Valor formatado']), axis=-1)
+    )
+
+    # Personalização do layout
+    fig_longo_agrupado.update_layout(
+        # Remove título do eixo Y
+        yaxis_title=None, 
+        # Remove o grid e tick labels do eixo Y
+        yaxis=dict(showgrid=False, showticklabels=False), 
+        # Remove o grid do eixo X
+        xaxis=dict(showgrid=False),
+        # Cor de fundo do gráfico
+        plot_bgcolor='rgba(0, 0, 0, 0)', 
+        # Cor do papel
+        paper_bgcolor='rgba(0, 0, 0, 0)',
+        # Cor do título
+        title_font_color='white',
+        # Cor da legenda
+        legend_title_font_color='white',
+        # Posição da legenda
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+
+    st.plotly_chart(fig_longo_agrupado, use_container_width=True)
+
+# ===================================================================================
+# 4. LAYOUT DO DASHBOARD (Streamlit)
+# ===================================================================================
+
 st.title("💧 Análise de Volume e Custo de Água (m³ vs. R$)")
 
-# --- Upload do Arquivo ---
-uploaded_file = st.sidebar.file_uploader("Passo 1: Faça o upload do arquivo Excel (xlsx)", type=["xlsx"])
+# --- Barra Lateral (Sidebar) ---
+st.sidebar.header("Passo 1: Faça o upload do arquivo")
+uploaded_file = st.sidebar.file_uploader(
+    "Excel (xlsx)", 
+    type=['xlsx', 'xls'],
+    help="O arquivo deve conter as colunas 'Data', 'Volume_M3' (ou 'Qtd.M³') e 'Valor' (ou 'Custo')."
+)
 
-df_full = pd.DataFrame()
-if uploaded_file:
-    df_full = load_data(uploaded_file)
+# Inicializa o DataFrame vazio e a lista de erros
+df_processado = pd.DataFrame()
+colunas_faltantes = ["Nenhum dado processado"]
+dados_carregados = False
+
+# Processamento condicional após o upload do arquivo
+if uploaded_file is not None:
+    # Chama a função de processamento
+    df_processado, colunas_faltantes = carregar_e_processar_dados(uploaded_file)
     
-    if df_full.empty:
-        st.warning("O arquivo foi carregado, mas o DataFrame está vazio após o processamento. Verifique se as colunas 'Data', 'Volume_M3' e 'Valor' (ou equivalentes) estão preenchidas corretamente.")
+    # Verifica se o DataFrame tem dados e se não há colunas faltantes
+    if not df_processado.empty and not colunas_faltantes:
+        dados_carregados = True
     else:
-        st.sidebar.success("Arquivo carregado com sucesso!")
-        
-        # Filtrar o DataFrame apenas para os dados processados válidos
-        df_valid = df_full.dropna(subset=['Data', 'Volume_M3', 'Valor'])
-        
-        # --- Cálculo de Resumo ---
-        total_volume = df_valid['Volume_M3'].sum()
-        total_valor = df_valid['Valor'].sum()
-        
-        st.markdown("---")
-        col1, col2, col3 = st.columns(3)
-        # O número é formatado manualmente aqui para evitar dependência de locale
-        col1.metric("Volume Total (m³)", f"{total_volume:,.2f}".replace(",", "_").replace(".", ",").replace("_", "."), help="Soma total do consumo em metros cúbicos.")
-        col2.metric("Valor Total (R$)", format_real(total_valor), help="Soma total do valor gasto.")
-        
-        st.markdown("---")
-        
-        # --- Análise Mensal ---
-        
-        st.header("Análise de Custo (R$) e Volume (m³) por Meses")
-        df_mensal = df_valid.set_index('Data').resample('M').agg({
-            'Volume_M3': 'sum',
-            'Valor': 'sum'
-        }).reset_index()
-        df_mensal['Mês'] = df_mensal['Data'].dt.strftime('%B').str.capitalize()
-        
-        # Mapeamento para garantir a ordem correta dos meses
-        meses_ordem = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"]
-        df_mensal['Mês'] = pd.Categorical(df_mensal['Mês'], categories=meses_ordem, ordered=True)
-        df_mensal = df_mensal.sort_values('Mês')
+        dados_carregados = False
 
-        # Preparar dados para o gráfico (melt)
-        df_mensal_melt = df_mensal.melt(id_vars='Mês', value_vars=['Volume_M3', 'Valor'],
-                                        var_name='Métrica', value_name='Valor_Métrica')
-        
-        # Criar o gráfico
-        fig_mensal = px.bar(
-            df_mensal_melt,
-            x='Mês',
-            y='Valor_Métrica',
-            color='Métrica',
-            barmode='group',
-            title='Comparativo Mensal de Volume e Custo',
-            color_discrete_map={'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR},
-            height=500,
-            
-        )
-        
-        # Customização: Adicionar rótulos de dados
-        fig_mensal.update_traces(texttemplate='%{y:,.2f}', textposition='outside')
-        fig_mensal.update_layout(
-            xaxis_title='Mês',
-            yaxis_title='Volume/Valor (Escala Dupla, Aprox.)',
-            uniformtext_minsize=8, 
-            uniformtext_mode='hide',
-            legend_title_text='Métrica'
-        )
-        
-        st.plotly_chart(fig_mensal, use_container_width=True)
 
-        # --- Análise por Fornecedor ---
-        st.markdown("---")
-        st.header("Análise de Volume e Valor por Fornecedor")
-        
-        df_fornecedor = df_valid.groupby('FORNECEDOR').agg({
-            'Volume_M3': 'sum',
-            'Valor': 'sum'
-        }).reset_index()
+# --- Seção Principal ---
 
-        col_left, col_right = st.columns(2)
+if not uploaded_file:
+    st.info("Aguardando o upload de um arquivo Excel para iniciar a análise.")
 
-        # Gráfico 1: Volume (m³) por Fornecedor - Donut Chart
-        fig_volume_forn = px.pie(
-            df_fornecedor,
-            values='Volume_M3',
-            names='FORNECEDOR',
-            hole=.3,
-            title='Distribuição de Volume (m³) por Fornecedor',
-            color_discrete_sequence=px.colors.qualitative.Dark24,
-        )
-        # Customização: Mostrar Volume (m³) na formatação correta
-        fig_volume_forn.update_traces(
-            textinfo='percent+label',
-            hovertemplate="Fornecedor: %{label}<br>Volume (m³): %{value:,.2f}<br>Percentual: %{percent}<extra></extra>"
-        )
-        col_left.plotly_chart(fig_volume_forn, use_container_width=True)
-
-        # Gráfico 2: Valor (R$) por Fornecedor - Donut Chart
-        fig_valor_forn = px.pie(
-            df_fornecedor,
-            values='Valor',
-            names='FORNECEDOR',
-            hole=.3,
-            title='Distribuição de Valor (R$) por Fornecedor',
-            color_discrete_sequence=px.colors.qualitative.Dark24,
-        )
-        # Customização: Mostrar Valor (R$) na formatação correta
-        # Nota: O hover do Plotly é complexo para formatar R$ diretamente com Babel dentro dele. 
-        # A formatação básica é usada, o usuário verá o R$ na métrica geral.
-        fig_valor_forn.update_traces(
-            textinfo='percent+label',
-            hovertemplate="Fornecedor: %{label}<br>Valor (R$): %{value:,.2f}<br>Percentual: %{percent}<extra></extra>"
-        )
-        col_right.plotly_chart(fig_valor_forn, use_container_width=True)
-
-        # --- Análise Diária (Volume e Valor) ---
-        st.markdown("---")
-        st.header("Análise Diária de Volume (m³) e Valor Gasto (R$)")
-
-        # Dados diários agregados
-        df_diario = df_valid.groupby('Data').agg({
-            'Volume_M3': 'sum',
-            'Valor': 'sum'
-        }).reset_index()
-        
-        # Preparar dados para o gráfico (melt)
-        df_diario_long = df_diario.melt(id_vars='Data', value_vars=['Volume_M3', 'Valor'],
-                                        var_name='Métrica', value_name='Valor_Métrica')
-        
-        # Criar o gráfico
-        fig_diario = px.bar(
-            df_diario_long,
-            x='Data',
-            y='Valor_Métrica',
-            color='Métrica',
-            barmode='group',
-            title='Comparativo Diário de Consumo (m³) vs. Custo (R$)',
-            color_discrete_map={'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR},
-            height=550,
-        )
-        
-        # Customização dos traços
-        fig_diario.update_traces(
-            texttemplate='%{y:,.2f}', # Rótulos de dados para barras
-            textposition='outside',
-            textfont_size=12
-        )
-        
-        # Customização do layout
-        fig_diario.update_layout(
-            xaxis_title='Data',
-            yaxis_title='Volume/Valor (Escala Dupla, Aprox.)',
-            uniformtext_minsize=8,
-            uniformtext_mode='hide',
-            legend_title_text='Métrica',
-            hovermode="x unified"
-        )
-        
-        st.plotly_chart(fig_diario, use_container_width=True)
-
-        
-        # --- Análise por Dia da Semana ---
-        st.markdown("---")
-        st.header("Análise de Consumo por Dia da Semana")
-
-        # Tabela dinâmica
-        pivot_diario = pd.pivot_table(
-            df_valid,
-            values=['Volume_M3', 'Valor'],
-            index=['Dia_Semana'],
-            aggfunc='sum'
-        ).reset_index()
-
-        # Ordenar os dias da semana corretamente
-        dias_ordem = ['Segunda-feira', 'Terça-feira', 'Quarta-feira', 'Quinta-feira', 'Sexta-feira', 'Sábado', 'Domingo']
-        pivot_diario['Dia_Semana'] = pd.Categorical(pivot_diario['Dia_Semana'], categories=dias_ordem, ordered=True)
-        pivot_diario = pivot_diario.sort_values('Dia_Semana')
-        
-        # Linha Total
-        total_row = pd.DataFrame([['Total Geral', total_volume, total_valor]], columns=['Dia_Semana', 'Volume_M3', 'Valor'])
-        df_diario_semana = pd.concat([pivot_diario, total_row], ignore_index=True)
-
-        # Preparar dados para o gráfico (melt)
-        df_diario_semana_long = df_diario_semana.melt(id_vars='Dia_Semana', value_vars=['Volume_M3', 'Valor'],
-                                                     var_name='Métrica', value_name='Valor_Métrica')
-
-        # Criar o gráfico
-        fig_dia_semana = px.bar(
-            df_diario_semana_long,
-            x='Dia_Semana',
-            y='Valor_Métrica',
-            color='Métrica',
-            barmode='group',
-            title='Volume e Valor por Dia da Semana',
-            color_discrete_map={'Volume_M3': COR_AZUL_VOLUME, 'Valor': COR_VERDE_VALOR},
-            height=500
-        )
-
-        # Customização: Adicionar rótulos de dados
-        fig_dia_semana.update_traces(
-            texttemplate='%{y:,.2f}',
-            textposition='outside'
-        )
-        fig_dia_semana.update_layout(
-            xaxis_title='Dia da Semana',
-            yaxis_title='Volume/Valor (Escala Dupla, Aprox.)',
-            uniformtext_minsize=8,
-            uniformtext_mode='hide',
-            legend_title_text='Métrica'
-        )
-
-        st.plotly_chart(fig_dia_semana, use_container_width=True)
-
-        # --- Tabela de Inspeção de Dados ---
+elif not dados_carregados:
+    st.error(f"Erro ao carregar ou processar os dados. Verifique a estrutura do seu arquivo.")
+    
+    # Mensagem específica para colunas faltantes
+    if "Erro de Leitura" in colunas_faltantes:
+        st.warning("Não foi possível ler o arquivo. Certifique-se de que é um arquivo Excel (.xlsx) válido e não está protegido por senha.")
+    elif colunas_faltantes and colunas_faltantes[0] != "Arquivo não enviado":
+        st.warning(f"O arquivo foi carregado, mas as colunas necessárias estão faltando ou não foram reconhecidas. Colunas esperadas: {', '.join(colunas_faltantes)} (ou equivalentes como 'Qtd.M³' e 'Custo').")
+    elif df_processado.empty:
+        st.warning("O arquivo foi carregado, mas o DataFrame está vazio após o processamento (filtros de data/valor). Verifique se as colunas 'Data', 'Volume_M3' e 'Valor' (ou equivalentes) estão preenchidas corretamente e contêm valores maiores que zero.")
+    
+    # Se houver dados brutos (após erro), exibe a inspeção
+    if not df_processado.empty:
         with st.expander("Inspeção de Dados Brutos Lidos (Para Validação)"):
-            st.dataframe(df_valid)
+            st.dataframe(df_processado.head(20))
 
 else:
-    st.info("Aguardando o upload do arquivo de dados para iniciar a análise.")
+    # --- FILTROS ---
+    st.sidebar.header("Passo 2: Filtros de Período")
+
+    # Mês/Ano único
+    meses_disponiveis = df_processado['Mês/Ano'].unique()
+    mes_ano_selecionado = st.sidebar.selectbox(
+        "Selecione o Mês/Ano para a Análise Diária:",
+        options=meses_disponiveis,
+        index=len(meses_disponiveis) - 1 # Padrão para o último mês
+    )
+    
+    # Filtra o DataFrame
+    df_filtrado_diario = df_processado[df_processado['Mês/Ano'] == mes_ano_selecionado]
+
+    # --- MÉTRICAS (KPIs) ---
+    col1, col2, col3, col4 = st.columns(4)
+
+    # Cálculo dos KPIs
+    total_volume = df_processado['Volume_M3'].sum()
+    total_valor = df_processado['Valor'].sum()
+    volume_medio_diario = df_processado['Volume_M3'].mean()
+    valor_medio_diario = df_processado['Valor'].mean()
+    
+    # Formatação dos KPIs
+    valor_formatado_total = format_currency(total_valor, CURRENCY_CODE, locale=CURRENCY_LOCALE)
+    valor_formatado_medio = format_currency(valor_medio_diario, CURRENCY_CODE, locale=CURRENCY_LOCALE)
+    
+    col1.metric("Volume Total (m³)", f"{total_volume:,.2f} m³")
+    col2.metric("Custo Total (R$)", valor_formatado_total)
+    col3.metric("Volume Médio Diário (m³)", f"{volume_medio_diario:,.2f} m³")
+    col4.metric("Custo Médio Diário (R$)", valor_formatado_medio)
+
+    st.markdown("---")
+    
+    # --- GRÁFICOS ---
+    
+    # Gráfico 1: Análise Diária (Filtrada por Mês)
+    st.subheader(f"Comparativo Diário de Consumo no Mês: {mes_ano_selecionado}")
+    if not df_filtrado_diario.empty:
+        criar_grafico_longo_diario(df_filtrado_diario)
+    else:
+        st.warning("Dados insuficientes para o gráfico diário no mês selecionado.")
+
+    st.markdown("---")
+
+    # Gráfico 2: Análise por Dia da Semana (Total do Período)
+    st.subheader("Volume e Valor por Dia da Semana (Total do Período)")
+    criar_grafico_dia_semana(df_processado)
+
+    st.markdown("---")
+
+    # Tabela de Inspeção Final
+    with st.expander("Inspeção de Dados Processados (Para Validação)"):
+        st.dataframe(df_processado.head())
+        st.dataframe(df_processado.describe())
+        st.dataframe(df_processado) # Tabela completa no final
